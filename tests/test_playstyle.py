@@ -51,6 +51,7 @@ class Scenario:
         self.summons = []
         self.teammates = []
         self.blocked = lambda move: False
+        self.short_blocked = None
         self.visible = lambda pos, skill: True
         self.hold = 0
         self.safe, self.attack_range, self.super_range = 200, 400, 300
@@ -84,7 +85,7 @@ class Scenario:
                  "get_entity_pos": pos, "get_brawler_range": lambda b: (self.safe, self.attack_range, self.super_range),
                  "must_brawler_hold_attack": lambda b, info: self.hold > 0,
                  "find_closest_enemy": closest, "is_enemy_hittable": lambda p, t, w, s: self.visible(t, s),
-                 "is_path_blocked": lambda p, m, w: self.blocked(m),
+                 "is_path_blocked": lambda p, m, w, distance=None: (self.short_blocked(m) if distance is not None and self.short_blocked is not None else self.blocked(m)),
                  "attack": attack, "use_gadget": action("gadget"), "use_super": action("super"),
                  "use_hypercharge": action("hyper"), "is_super_ready": self.super_ready,
                  "is_gadget_ready": self.gadget_ready, "is_hypercharge_ready": self.hyper_ready,
@@ -150,6 +151,28 @@ class PlaystyleTests(unittest.TestCase):
     def test_fully_blocked_stops(self):
         self.s.blocked = lambda m: True
         self.assertEqual(self.s.run(), (0, 0))
+
+    def test_alone_short_step_if_full_lookahead_blocks_every_direction(self):
+        self.s.blocked = lambda move: True
+        self.s.short_blocked = lambda move: move[0] <= 20
+        x, y = self.s.run()
+        self.assertGreater(x, 20)
+        self.assertFalse(self.s.short_blocked((x, y)))
+
+    def test_combat_does_not_use_alone_short_step_fallback(self):
+        self.s.enemies = [box(0, -100)]
+        self.s.blocked = lambda move: True
+        self.s.short_blocked = lambda move: False
+        self.assertEqual(self.s.run(), (0, 0))
+
+    def test_alone_after_gap_still_moves_without_a_target(self):
+        self.s.run()
+        self.s.clock.now += 5
+        self.s.actions.clear()
+        x, y = self.s.run()
+        self.assertEqual(x, 0)
+        self.assertLess(y, 0)
+        self.assertEqual(self.s.actions, [])
 
     def test_nearest_blocked_target_is_not_confused_with_far_visible_one(self):
         self.s.enemies = [box(0, -100), box(0, -200)]
