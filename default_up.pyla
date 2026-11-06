@@ -1,102 +1,174 @@
-{"name": "Default - UP", "description": "Default logic, when target is UP", "brawlers": ["all"], "gamemodes": ["3v3", "5v5"], "author": "nertin", "date": "2026-04-23"}
-def no_enemy_movement(player_data, walls):
-    preferred_movement = (0, -JOYSTICK_RADIUS)
+{"name":"Brawl Ball - UP (combat support)","description":"Forward pressure, spacing and obstacle-aware combat for Brawl Ball; ball and goal are not visible to playstyles.","brawlers":["all"],"gamemodes":["3v3","5v5"],"author":"nertin / Arena","date":"2026-11-06"}
+# PylaAI's playstyle API does not expose the ball, possession, goal, HP, ammo,
+# or manual aiming. UP is an assumed attacking direction, not a detected goal.
+# All coordinates and ranges are in the screen-space units supplied by PylaAI.
 
-    if not is_path_blocked(player_data, preferred_movement, walls):
-        return preferred_movement
-    else:
-        # Try alternative movements
-        alternative_moves = [(0, -JOYSTICK_RADIUS), (-JOYSTICK_RADIUS, 0), (0, JOYSTICK_RADIUS), (JOYSTICK_RADIUS, 0)]
-        alternative_moves.remove(preferred_movement)
-        random.shuffle(alternative_moves)
-        for move in alternative_moves:
-            if not is_path_blocked(player_data, move, walls):
-                return move
-        return preferred_movement
+info = brawlers_info[brawler]
 
-brawler_info = brawlers_info.get(brawler)
-if not brawler_info:
-    raise ValueError(f"Brawler '{brawler}' not found in brawlers info.")
-must_brawler_hold_attack = must_brawler_hold_attack(brawler, brawlers_info)
-# if a brawler has been holding an attack for its max duration + the bot setting, then we release
-if must_brawler_hold_attack and persistent_data["time_since_holding_attack"] is not None and time.time() - persistent_data["time_since_holding_attack"] >= brawler_info['hold_attack'] + seconds_to_hold_attack_after_reaching_max:
-    attack(touch_up=True, touch_down=False)
-    persistent_data["time_since_holding_attack"] = None
-
-safe_range, attack_range, super_range = get_brawler_range(brawler)
+now = time.time()
 player_pos = get_entity_pos(player_data)
-if debug: print("found player pos:", player_pos)
-if not is_there_enemy(enemy_data):
-    movement = no_enemy_movement(player_data, walls)
-else:
-    enemy_coords, enemy_distance = find_closest_enemy(enemy_data, player_pos, walls, "attack")
-    if enemy_coords is None:
-        movement = no_enemy_movement(player_data, walls)
+safe_range, attack_range, super_range = get_brawler_range(brawler)
+hold_attack = must_brawler_hold_attack(brawler, brawlers_info)
+persistent_data.setdefault("time_since_holding_attack", None)
+
+
+def unit(x, y):
+    length = math.hypot(x, y)
+    if length < 0.001:
+        return (0.0, 0.0)
+    return (x / length, y / length)
+
+
+def distance(a, b):
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+# Auto-attack is a button tap: choosing a box here does not aim the attack.
+# Base firing decisions on the nearest entity, not a more distant visible one.
+closest_box = None
+closest_distance = float("inf")
+for box in enemy_data:
+    pos = get_entity_pos(box)
+    d = distance(player_pos, pos)
+    if d < closest_distance:
+        closest_box = box
+        closest_distance = d
+
+# This call also informs PylaAI whether the selected target is a spawnable.
+target_pos = None
+target_distance = None
+if closest_box is not None:
+    target_pos, target_distance = find_closest_enemy([closest_box], player_pos, walls, "attack")
+
+# Real enemy brawlers influence spacing even when a summon is the closest target.
+combat_enemies = enemy_brawler_data
+threat_pos = None
+threat_distance = float("inf")
+for box in combat_enemies:
+    pos = get_entity_pos(box)
+    d = distance(player_pos, pos)
+    if d < threat_distance:
+        threat_pos = pos
+        threat_distance = d
+
+# Keep pressure towards the opponent's presumed end, but do not blindly rush
+# a nearby enemy. Short-range / zero-safe-range brawlers close the distance.
+desired_x, desired_y = 0.0, -1.0
+if threat_pos is not None:
+    toward_x, toward_y = unit(threat_pos[0] - player_pos[0], threat_pos[1] - player_pos[1])
+    if safe_range > 0:
+        ideal = min(attack_range * 0.85, safe_range)
+        ideal = max(ideal, attack_range * 0.35)
     else:
-        if debug: print("found enemy pos:", enemy_coords)
-        direction_x = enemy_coords[0] - player_pos[0]
-        direction_y = enemy_coords[1] - player_pos[1]
+        ideal = attack_range * 0.25
+    if threat_distance < ideal * 0.78 and ideal > 0:
+        desired_x, desired_y = -toward_x * 1.4, -toward_y * 1.4 - 0.25
+    elif threat_distance > ideal * 1.15:
+        desired_x, desired_y = toward_x * 0.85, toward_y * 0.85 - 0.7
+    else:
+        # Prefer the strafe that moves up; keep the side stable on ties.
+        side = persistent_data.get("bb_strafe_side", 1)
+        if abs(toward_x) > 0.15:
+            side = -1 if toward_x > 0 else 1
+        persistent_data["bb_strafe_side"] = side
+        desired_x = -toward_y * side * 0.7
+        desired_y = toward_x * side * 0.7 - 0.45
 
-        # Determine initial movement direction
-        if enemy_distance > safe_range:  # Move towards the enemy
-            move_horizontal = (direction_x, 0)
-            move_vertical = (0, direction_y)
-            move_diagonal = (direction_x, direction_y)
-        else:  # Move away from the enemy
-            move_horizontal = (-direction_x, 0)
-            move_vertical = (0, -direction_y)
-            move_diagonal = (-direction_x, -direction_y)
-
-        movement_options = [move_diagonal, move_vertical, move_horizontal]
-
-        # Check for walls and adjust movement
-        for move in movement_options:
-            if not is_path_blocked(player_data, move, walls):
-                movement = move
-                break
-        else:
-            # If all preferred directions are blocked, try other directions
-            alternative_moves = [(0, -JOYSTICK_RADIUS), (-JOYSTICK_RADIUS, 0), (0, JOYSTICK_RADIUS), (JOYSTICK_RADIUS, 0)]
-            random.shuffle(alternative_moves)
-            for move in alternative_moves:
-                if not is_path_blocked(player_data, move, walls):
-                    movement = move
-                    break
-            else:
-                # if no movement is available, we still try to go in the best direction
-                # because it's better than doing nothing
-                movement = move_diagonal
+# Stay out of a teammate's immediate space without chasing the team away
+# from the objective. This is local separation, not ball-carrier detection.
+for box in teammate_data:
+    teammate_pos = get_entity_pos(box)
+    d = distance(player_pos, teammate_pos)
+    if 0.01 < d < TILE_SIZE * 1.5:
+        away_x, away_y = unit(player_pos[0] - teammate_pos[0], player_pos[1] - teammate_pos[1])
+        weight = 0.45 * (1.0 - d / (TILE_SIZE * 1.5))
+        desired_x += away_x * weight
+        desired_y += away_y * weight
 
 
+def choose_movement(dx, dy):
+    ux, uy = unit(dx, dy)
+    if ux == 0 and uy == 0:
+        ux, uy = 0.0, -1.0
+    direct = (ux * JOYSTICK_RADIUS, uy * JOYSTICK_RADIUS)
+    if not is_path_blocked(player_data, direct, walls):
+        persistent_data["bb_detour_until"] = 0.0
+        return direct
 
-        if is_super_ready and persistent_data["time_since_holding_attack"] is None:
-            super_type = brawler_info['super_type']
-            enemy_hittable = is_enemy_hittable(player_pos, enemy_coords, walls, "super")
+    # Commit briefly to one side of an obstacle rather than randomly swapping
+    # left/right on every frame. Consider a full circle, never an obstructed
+    # fallback. The engine may also apply its own unstuck movement afterwards.
+    side = persistent_data.get("bb_detour_side", 1)
+    locked = now < persistent_data.get("bb_detour_until", 0.0)
+    best = None
+    best_score = -1000.0
+    best_side = side
+    for i in range(1, 16):
+        angle = i * math.pi / 8.0
+        cx = ux * math.cos(angle) - uy * math.sin(angle)
+        cy = ux * math.sin(angle) + uy * math.cos(angle)
+        move = (cx * JOYSTICK_RADIUS, cy * JOYSTICK_RADIUS)
+        if is_path_blocked(player_data, move, walls):
+            continue
+        cross = ux * cy - uy * cx
+        candidate_side = 1 if cross >= 0 else -1
+        score = ux * cx + uy * cy
+        if locked and candidate_side == side:
+            score += 0.35
+        if not locked:
+            score += -cy * 0.08
+        if score > best_score:
+            best, best_score, best_side = move, score, candidate_side
+    if best is None:
+        return (0.0, 0.0)
+    if not locked or best_side != side:
+        persistent_data["bb_detour_side"] = best_side
+        persistent_data["bb_detour_until"] = now + 1.2
+    return best
 
-            if (enemy_hittable and
-                    (enemy_distance <= super_range
-                     or super_type in ["spawnable", "other"]
-                     or (brawler in ["stu", "surge"] and super_type == "charge" and enemy_distance <= super_range + attack_range)
-                    )):
-                if is_hypercharge_ready:
-                    use_hypercharge()
 
-                use_super()
+movement = choose_movement(desired_x, desired_y)
 
+hittable = (target_pos is not None and target_distance <= attack_range
+            and is_enemy_hittable(player_pos, target_pos, walls, "attack"))
+holding_since = persistent_data["time_since_holding_attack"]
+released = False
+if holding_since is not None:
+    # Never leave a press held after the target disappears or becomes blocked.
+    # A release consumes this tick so we do not immediately press again.
+    hold_time = max(0.0, float(info.get("hold_attack", 0.0)))
+    if not hold_attack or not hittable or now - holding_since >= hold_time:
+        attack(touch_up=True, touch_down=False)
+        persistent_data["time_since_holding_attack"] = None
+        holding_since = None
+        released = True
 
-        # Attack if enemy is within attack range and hittable
-        if enemy_distance <= attack_range:
-            enemy_hittable = is_enemy_hittable(player_pos, enemy_coords, walls, "attack")
-            if enemy_hittable:
-                if is_gadget_ready and persistent_data["time_since_holding_attack"] is None:
-                    use_gadget()
+# Only use abilities on the selected brawler, not on a summon. A ready icon
+# alone is not a reason to spend a super/gadget from the other side of the map.
+is_real_target = False
+for box in combat_enemies:
+    if closest_box is box:
+        is_real_target = True
+        break
+if is_real_target and target_pos is not None and holding_since is None and not released:
+    super_type = info.get("super_type", "")
+    super_clear = is_enemy_hittable(player_pos, target_pos, walls, "super")
+    can_super = (super_type == "damage" and target_distance <= super_range and super_clear)
+    # Auto-aimed mobility supers can waste the ball or dive into danger;
+    # leave charge, dash, spawn and special supers for manual play.
+    if is_super_ready and can_super and now - persistent_data.get("bb_last_super", -1000.0) >= 1.0:
+        if is_hypercharge_ready:
+            use_hypercharge()
+        use_super()
+        persistent_data["bb_last_super"] = now
+    if (is_gadget_ready and hittable and target_distance <= min(attack_range * 0.55, TILE_SIZE * 3.0)
+            and now - persistent_data.get("bb_last_gadget", -1000.0) >= 4.0):
+        use_gadget()
+        persistent_data["bb_last_gadget"] = now
 
-                if not must_brawler_hold_attack:
-                    attack()
-                else:
-                    if persistent_data["time_since_holding_attack"] is None:
-                        persistent_data["time_since_holding_attack"] = time.time()
-                        attack(touch_up=False, touch_down=True)
-                    elif time.time() - persistent_data["time_since_holding_attack"] >= brawlers_info[brawler]['hold_attack']:
-                        attack(touch_up=True, touch_down=False)
-                        persistent_data["time_since_holding_attack"] = None
+if hittable and not released:
+    if not hold_attack:
+        attack()
+    elif holding_since is None:
+        persistent_data["time_since_holding_attack"] = now
+        attack(touch_up=False, touch_down=True)
