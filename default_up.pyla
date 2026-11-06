@@ -14,7 +14,8 @@ persistent_data.setdefault("time_since_holding_attack", None)
 # Player-relative positions cannot be trusted after a long interruption (for
 # example, death or pause). This is not a real map position or death detector.
 previous_tick = persistent_data.get("bb_search_tick", now)
-if now < previous_tick or now - previous_tick > 2.0:
+interrupted = now < previous_tick or now - previous_tick > 2.0
+if interrupted:
     persistent_data["bb_search_started"] = now
     persistent_data["bb_last_enemy_time"] = None
     persistent_data["bb_last_enemy_vector"] = None
@@ -32,16 +33,24 @@ def distance(a, b):
     return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
-# Auto-attack is a button tap: choosing a box here does not aim the attack.
-# Base firing decisions on the nearest entity, not a more distant visible one.
+# Button taps use the game's own auto-aim, so selecting a detection here does
+# not force it to be targeted. Prefer an attackable in-range detection over a
+# nearer blocked one, falling back to the nearest detection for other checks.
 closest_box = None
 closest_distance = float("inf")
+clear_box = None
+clear_distance = float("inf")
 for box in enemy_data:
     pos = get_entity_pos(box)
     d = distance(player_pos, pos)
     if d < closest_distance:
         closest_box = box
         closest_distance = d
+    if d <= attack_range and d < clear_distance and is_enemy_hittable(player_pos, pos, walls, "attack"):
+        clear_box = box
+        clear_distance = d
+if clear_box is not None:
+    closest_box = clear_box
 
 # This call also informs PylaAI whether the selected target is a spawnable.
 target_pos = None
@@ -209,7 +218,7 @@ if holding_since is not None:
     # Never leave a press held after the target disappears or becomes blocked.
     # A release consumes this tick so we do not immediately press again.
     hold_time = max(0.0, float(info.get("hold_attack", 0.0)))
-    if not hold_attack or not hittable or now - holding_since >= hold_time:
+    if interrupted or now < holding_since or not hold_attack or not hittable or now - holding_since >= hold_time:
         attack(touch_up=True, touch_down=False)
         persistent_data["time_since_holding_attack"] = None
         holding_since = None
@@ -225,9 +234,15 @@ for box in combat_enemies:
 if is_real_target and target_pos is not None and holding_since is None and not released:
     super_type = info.get("super_type", "")
     super_clear = is_enemy_hittable(player_pos, target_pos, walls, "super")
-    can_super = (super_type == "damage" and target_distance <= super_range and super_clear)
-    # Auto-aimed mobility supers can waste the ball or dive into danger;
-    # leave charge, dash, spawn and special supers for manual play.
+    # Different brawlers have different super types. Range 0 denotes several
+    # self/support abilities; evaluate those (and summons) in nearby combat.
+    # Auto-aim can still pick a different target or use the ball instead.
+    if super_type in ["damage", "charge", "dash", "other_target"]:
+        can_super = super_clear and super_range > 0 and target_distance <= super_range
+    elif super_type in ["spawnable", "other"]:
+        can_super = super_clear and target_distance <= attack_range
+    else:
+        can_super = False
     if is_super_ready and can_super and now - persistent_data.get("bb_last_super", -1000.0) >= 1.0:
         if is_hypercharge_ready:
             use_hypercharge()

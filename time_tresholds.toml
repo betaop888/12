@@ -5,5 +5,5 @@ gadget = 0.1
 hypercharge = 0.1
 super = 0.1
 wall_detection = 0.2
-no_detection_proceed = 8
+no_detection_proceed = 10
 check_if_brawl_stars_crashed = 5.0

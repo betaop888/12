@@ -58,6 +58,8 @@ class Scenario:
         self.super_type = "damage"
         self.info_override = None
         self.super_ready = self.gadget_ready = self.hyper_ready = False
+        self.closest_override = None
+        self.ability_guard = None
 
     def run(self):
         def pos(b):
@@ -70,7 +72,10 @@ class Scenario:
         def attack(touch_up=True, touch_down=True):
             self.actions.append(("attack", touch_up, touch_down))
         def action(name):
-            return lambda: self.actions.append((name,))
+            def run_action():
+                if self.ability_guard is None or self.ability_guard():
+                    self.actions.append((name,))
+            return run_action
         # Mirrors upstream SAFE_GLOBALS and its empty builtins, rather than
         # accidentally letting the playstyle use the test runner's builtins.
         scope = {"__builtins__": {}, "math": math, "random": random,
@@ -84,7 +89,7 @@ class Scenario:
                  "brawlers_info": {"test": self.info_override or {"hold_attack": self.hold, "super_type": self.super_type}},
                  "get_entity_pos": pos, "get_brawler_range": lambda b: (self.safe, self.attack_range, self.super_range),
                  "must_brawler_hold_attack": lambda b, info: self.hold > 0,
-                 "find_closest_enemy": closest, "is_enemy_hittable": lambda p, t, w, s: self.visible(t, s),
+                 "find_closest_enemy": self.closest_override or closest, "is_enemy_hittable": lambda p, t, w, s: self.visible(t, s),
                  "is_path_blocked": lambda p, m, w, distance=None: (self.short_blocked(m) if distance is not None and self.short_blocked is not None else self.blocked(m)),
                  "attack": attack, "use_gadget": action("gadget"), "use_super": action("super"),
                  "use_hypercharge": action("hyper"), "is_super_ready": self.super_ready,
@@ -264,10 +269,17 @@ class PlaystyleTests(unittest.TestCase):
         self.assertLess(y, 0)
         self.assertEqual(self.s.actions, [])
 
-    def test_nearest_blocked_target_is_not_confused_with_far_visible_one(self):
+    def test_farther_visible_enemy_in_range_allows_attack(self):
         self.s.enemies = [box(0, -100), box(0, -200)]
         self.s.visible = lambda pos, skill: pos[1] != -100
         self.s.super_ready = self.s.gadget_ready = True
+        self.s.run()
+        self.assertIn(("attack", True, True), self.s.actions)
+        self.assertIn(("super",), self.s.actions)
+
+    def test_blocked_or_out_of_range_targets_do_not_trigger_attack(self):
+        self.s.enemies = [box(0, -100), box(0, -500)]
+        self.s.visible = lambda pos, skill: pos[1] != -100
         self.s.run()
         self.assertEqual(self.s.actions, [])
 
@@ -290,14 +302,48 @@ class PlaystyleTests(unittest.TestCase):
         self.s.run()
         self.assertEqual(self.s.actions, [("attack", True, True)])
 
-    def test_mobility_super_conserved(self):
+    def test_all_known_super_types_can_be_used_in_combat(self):
         self.s.enemies = [box(0, -100)]
         self.s.super_ready = True
-        for kind in ("charge", "dash", "spawnable", "other", "other_target"):
+        for kind in ("damage", "charge", "dash", "spawnable", "other", "other_target"):
+            self.s.state.clear()
+            self.s.state["time_since_holding_attack"] = None
             self.s.super_type = kind
             self.s.actions.clear()
             self.s.run()
-            self.assertNotIn(("super",), self.s.actions)
+            self.assertIn(("super",), self.s.actions, kind)
+
+    def test_no_super_without_ready_real_target_or_inappropriate_range(self):
+        self.s.enemies = [box(0, -350)]
+        self.s.super_ready = True
+        for kind in ("damage", "charge", "dash", "other_target"):
+            self.s.super_type = kind
+            self.s.actions.clear()
+            self.s.run()
+            self.assertNotIn(("super",), self.s.actions, kind)
+        self.s.enemies = [box(0, -500)]
+        for kind in ("spawnable", "other"):
+            self.s.super_type = kind
+            self.s.actions.clear()
+            self.s.run()
+            self.assertNotIn(("super",), self.s.actions, kind)
+        self.s.enemies = [box(0, -100)]
+        self.s.super_ready = False
+        self.s.actions.clear()
+        self.s.run()
+        self.assertNotIn(("super",), self.s.actions)
+
+    def test_super_blocked_by_wall_and_unknown_type_are_not_used(self):
+        self.s.enemies = [box(0, -100)]
+        self.s.super_ready = True
+        self.s.visible = lambda p, skill: skill != "super"
+        self.s.run()
+        self.assertNotIn(("super",), self.s.actions)
+        self.s.visible = lambda p, skill: True
+        self.s.super_type = "unknown"
+        self.s.actions.clear()
+        self.s.run()
+        self.assertNotIn(("super",), self.s.actions)
 
     def test_hold_release_and_no_same_tick_repress(self):
         self.s.enemies = [box(0, -100)]
@@ -305,8 +351,9 @@ class PlaystyleTests(unittest.TestCase):
         self.s.run()
         self.assertEqual(self.s.actions, [("attack", False, True)])
         self.s.actions.clear()
-        self.s.clock.now += 2
-        self.s.run()
+        for _ in range(4):
+            self.s.clock.now += .5
+            self.s.run()
         self.assertEqual(self.s.actions, [])
         self.s.clock.now += 1
         self.s.run()
@@ -315,6 +362,30 @@ class PlaystyleTests(unittest.TestCase):
         self.s.actions.clear()
         self.s.run()
         self.assertEqual(self.s.actions, [("attack", False, True)])
+
+    def test_held_attack_released_after_long_interruption_even_if_target_visible(self):
+        self.s.enemies = [box(0, -100)]
+        self.s.hold = 3
+        self.s.run()
+        self.s.actions.clear()
+        self.s.clock.now += 2.1
+        self.s.run()
+        self.assertEqual(self.s.actions, [("attack", True, False)])
+        self.assertIsNone(self.s.state["time_since_holding_attack"])
+        self.s.actions.clear()
+        self.s.clock.now += .1
+        self.s.run()
+        self.assertEqual(self.s.actions, [("attack", False, True)])
+
+    def test_held_attack_released_if_clock_moves_back(self):
+        self.s.enemies = [box(0, -100)]
+        self.s.hold = 3
+        self.s.run()
+        self.s.actions.clear()
+        self.s.clock.now -= 1
+        self.s.run()
+        self.assertEqual(self.s.actions, [("attack", True, False)])
+        self.assertIsNone(self.s.state["time_since_holding_attack"])
 
     def test_held_attack_released_when_target_lost_or_blocked(self):
         for mode in ("lost", "blocked", "out_of_range"):
@@ -357,6 +428,7 @@ class PlaystyleTests(unittest.TestCase):
                 self.s.super_ready = self.s.gadget_ready = True
                 x, y = self.s.run()
                 self.assertTrue(math.isfinite(x) and math.isfinite(y))
+                self.assertIn(("super",), self.s.actions)
 
     def test_various_scales_and_ranges_are_finite(self):
         for scale in (.5, 1, 2):
@@ -367,6 +439,52 @@ class PlaystyleTests(unittest.TestCase):
                 x, y = self.s.run()
                 self.assertTrue(math.isfinite(x) and math.isfinite(y))
                 self.assertAlmostEqual(math.hypot(x, y), 100)
+
+
+@unittest.skipUnless(os.environ.get("PYLA_SOURCE"), "set PYLA_SOURCE to check target selection")
+class UpstreamTargetingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        path = Path(os.environ["PYLA_SOURCE"]) / "play.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        play = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Play")
+        names = {"get_entity_pos", "get_distance", "is_enemy_spawnable", "select_enemy_target",
+                 "can_use_ability_on_enemy", "find_closest_enemy", "enemy_targets"}
+        methods = [n for n in play.body if isinstance(n, ast.FunctionDef) and n.name in names]
+        if len(methods) != len(names):
+            raise AssertionError("Upstream targeting methods changed")
+        node = ast.ClassDef(name="Play", bases=[], keywords=[], body=methods, decorator_list=[])
+        module = ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[]))
+        scope = {"math": math}
+        exec(compile(module, str(path), "exec"), scope)
+        cls.Play = scope["Play"]
+
+    def setUp(self):
+        self.s = Scenario()
+        self.p = self.Play()
+        self.p._selected_enemy_spawnable = None
+        self.p.context = {"enemy_brawler_data": self.s.enemies, "enemy_spawnable_data": self.s.summons}
+        self.p.is_enemy_hittable = lambda player, target, walls, skill: self.s.visible(target, skill)
+        self.s.closest_override = self.p.find_closest_enemy
+        self.s.ability_guard = self.p.can_use_ability_on_enemy
+        self.s.super_ready = True
+
+    def test_visible_brawler_selected_even_if_near_summon_is_blocked(self):
+        self.s.summons.append(box(0, -50))
+        self.s.enemies.append(box(0, -200))
+        self.s.visible = lambda p, skill: p[1] != -50
+        self.s.run()
+        self.assertFalse(self.p._selected_enemy_spawnable)
+        self.assertIn(("attack", True, True), self.s.actions)
+        self.assertIn(("super",), self.s.actions)
+
+    def test_near_visible_summon_still_blocks_abilities(self):
+        self.s.summons.append(box(0, -50))
+        self.s.enemies.append(box(0, -200))
+        self.s.run()
+        self.assertTrue(self.p._selected_enemy_spawnable)
+        self.assertIn(("attack", True, True), self.s.actions)
+        self.assertNotIn(("super",), self.s.actions)
 
 
 if __name__ == "__main__":
