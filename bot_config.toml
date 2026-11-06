@@ -1,4 +1,4 @@
-minimum_movement_delay = 0.1
+minimum_movement_delay = 0.0
 unstuck_movement_delay = 2.4
 unstuck_movement_hold_time = 1.4
 perceived_tile_size = 54

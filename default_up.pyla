@@ -120,7 +120,23 @@ def choose_movement(dx, dy):
         if score > best_score:
             best, best_score, best_side = move, score, candidate_side
     if best is None:
-        return (0.0, 0.0)
+        # Around a spawn the one-tile lookahead can reject every direction.
+        # When alone, also check a short step before giving up. Never use an
+        # unchecked direction; real walls/other obstacles still take priority.
+        if not enemy_data and not teammate_data:
+            for i in range(16):
+                angle = i * math.pi / 8.0
+                cx = ux * math.cos(angle) - uy * math.sin(angle)
+                cy = ux * math.sin(angle) + uy * math.cos(angle)
+                move = (cx * JOYSTICK_RADIUS, cy * JOYSTICK_RADIUS)
+                if not is_path_blocked(player_data, move, walls, TILE_SIZE * 0.3):
+                    score = ux * cx + uy * cy
+                    if score > best_score:
+                        best, best_score = move, score
+        if best is None:
+            return (0.0, 0.0)
+        persistent_data["bb_detour_until"] = 0.0
+        return best
     if not locked or best_side != side:
         persistent_data["bb_detour_side"] = best_side
         persistent_data["bb_detour_until"] = now + 1.2

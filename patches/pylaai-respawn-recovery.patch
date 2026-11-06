@@ -1,0 +1,90 @@
+--- a/play.py
++++ b/play.py
+@@ -75,6 +75,9 @@
+ 
+         self.time_since_walls_checked = 0
+         self.time_since_player_last_found = time.time()
++        self._player_detection_missing = False
++        self._missing_input_reset = False
++        self._alone_next_input_refresh = 0.0
+         self.current_brawler = None
+         self.brawlers_info = load_brawlers_info()
+         self.brawler_ranges = None
+@@ -522,7 +525,7 @@
+     @staticmethod
+     def validate_game_data(data):
+         incomplete = False
+-        if "player" not in data.keys():
++        if not data.get("player"):
+             incomplete = True  # This is required so track_no_detections can also keep track if enemy is missing
+ 
+         if "enemy" not in data.keys():
+@@ -795,6 +798,18 @@
+ 
+         self.window_controller.debug_view.publish(frame, debug_data)
+ 
++    def reset_movement_input(self, current_time, reset_navigation=True):
++        """Force the next movement to start with a new joystick touch."""
++        self.window_controller.release_movement()
++        self.last_movement = ''
++        self.last_movement_change_time = 0.0
++        if reset_navigation:
++            self.time_since_different_movement = current_time
++            self.fix_movement_keys["toggled"] = False
++            self.fix_movement_keys["last_direction_key"] = None
++            self.fix_movement_keys["rotation_sign"] = 1
++            self.fix_movement_keys["rotation_angle_step"] = 1
++
+     def main(self, frame, brawler, main):
+         current_time = time.time()
+         state = main.get_latest_state()
+@@ -822,12 +837,25 @@
+         data = self.validate_game_data(data)
+         self.track_no_detections(data)
+         if data:
++            if (state == "match" and self._player_detection_missing
++                    and not self._missing_input_reset
++                    and current_time - self.time_since_player_last_found >= 0.25):
++                self.reset_movement_input(current_time)
+             self.time_since_player_last_found = time.time()
+             if state != "match":
+                 data = None
+ 
+         if not data:
+-            if current_time - self.time_since_player_last_found > 1.0:
++            if state == "match":
++                self._player_detection_missing = True
++                if (not self._missing_input_reset
++                        and current_time - self.time_since_player_last_found >= 0.35):
++                    self.reset_movement_input(current_time)
++                    if self.persistent_data.get("time_since_holding_attack") is not None:
++                        self.attack(touch_up=True, touch_down=False)
++                        self.persistent_data["time_since_holding_attack"] = None
++                    self._missing_input_reset = True
++            elif current_time - self.time_since_player_last_found > 1.0:
+                 self.window_controller.release_movement()
+             if current_time - self.time_since_last_proceeding > self.no_detection_proceed_delay:
+                 current_state = get_state(frame)
+@@ -841,6 +869,22 @@
+                     self.time_since_last_proceeding = time.time()
+             self.publish_debug_view(frame, data, state)
+             return
++        if self._player_detection_missing:
++            self._player_detection_missing = False
++            self._missing_input_reset = False
++            self._alone_next_input_refresh = current_time + 2.0
++        # The game may cancel the physical touch on respawn while the
++        # controller still considers it held. If only the player is visible,
++        # periodically re-arm the joystick even when its direction is unchanged.
++        if data.get("enemy") or data.get("teammate"):
++            self._alone_next_input_refresh = 0.0
++        elif not self._alone_next_input_refresh:
++            self._alone_next_input_refresh = current_time + 2.0
++        elif current_time >= self._alone_next_input_refresh:
++            # Keep the engine's unstuck timer when refreshing an otherwise
++            # healthy touch; otherwise repeated refreshes would disable it.
++            self.reset_movement_input(current_time, reset_navigation=False)
++            self._alone_next_input_refresh = current_time + 2.0
+         self.time_since_last_proceeding = time.time()
+         if current_time - self.time_since_hypercharge_checked > self.hypercharge_treshold:
+             self.is_hypercharge_ready = self.check_if_hypercharge_ready(frame)
