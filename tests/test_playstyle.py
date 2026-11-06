@@ -128,6 +128,96 @@ class PlaystyleTests(unittest.TestCase):
         self.assertLess(y, 0)
         self.assertEqual(self.s.actions, [])
 
+    def test_regroups_with_distant_teammate_on_our_side(self):
+        self.s.teammates = [box(0, 300)]
+        x, y = self.s.run()
+        self.assertAlmostEqual(x, 0)
+        self.assertGreater(y, 0)
+        self.assertEqual(self.s.actions, [])
+
+    def test_does_not_chase_nearby_teammate(self):
+        self.s.teammates = [box(0, 80)]
+        x, y = self.s.run()
+        self.assertLess(y, 0)
+
+    def test_rear_teammate_takes_priority_over_stale_enemy(self):
+        self.s.enemies = [box(0, -300)]
+        self.s.run()
+        self.s.enemies = []
+        self.s.teammates = [box(0, 300)]
+        self.s.clock.now += .1
+        self.assertGreater(self.s.run()[1], 0)
+
+    def test_recent_enemy_heading_is_short_lived(self):
+        self.s.enemies = [box(0, 300)]
+        self.s.run()
+        self.s.actions.clear()
+        self.s.enemies = []
+        self.s.clock.now += .1
+        self.assertGreater(self.s.run()[1], 0)
+        self.s.clock.now += .8
+        self.assertLess(self.s.run()[1], 0)
+        self.assertEqual(self.s.actions, [])
+
+    def test_vanished_close_enemy_is_not_chased(self):
+        self.s.enemies = [box(0, 80)]
+        self.s.run()
+        self.s.enemies = []
+        self.s.clock.now += .1
+        self.assertLess(self.s.run()[1], 0)
+
+    def test_blind_search_returns_then_sweeps_and_advances(self):
+        self.s.run()
+        for _ in range(8):
+            self.s.clock.now += .5
+            move = self.s.run()
+        self.assertGreater(move[1], 0)
+        for _ in range(12):
+            self.s.clock.now += .5
+            move = self.s.run()
+        self.assertGreater(move[0], 0)
+        for _ in range(6):
+            self.s.clock.now += .5
+            move = self.s.run()
+        self.assertLess(move[1], 0)
+        self.assertEqual(self.s.actions, [])
+
+    def test_search_resets_after_interruption_or_enemy_reappears(self):
+        self.s.run()
+        for _ in range(9):
+            self.s.clock.now += .5
+            self.s.run()
+        self.assertGreater(self.s.run()[1], 0)
+        self.s.clock.now += 3
+        self.assertLess(self.s.run()[1], 0)
+        self.s.enemies = [box(300, 0)]
+        self.s.clock.now += .1
+        self.assertGreater(self.s.run()[0], 0)
+        self.s.enemies = []
+        self.s.clock.now += 1.0
+        self.assertLess(self.s.run()[1], 0)
+
+    def test_visible_enemy_still_has_priority_over_regrouping(self):
+        self.s.enemies = [box(500, 0)]
+        self.s.teammates = [box(0, 300)]
+        move = self.s.run()
+        self.assertGreater(move[0], 0)
+        self.assertLess(move[1], 0)
+
+    def test_search_respects_blocked_directions(self):
+        self.s.blocked = lambda move: move[1] > 70
+        self.s.run()
+        for _ in range(9):
+            self.s.clock.now += .5
+            move = self.s.run()
+        self.assertFalse(self.s.blocked(move))
+        self.assertNotEqual(move, (0, 0))
+
+    def test_visible_spawnable_remains_a_valid_attack_target(self):
+        self.s.summons = [box(0, -100)]
+        self.s.run()
+        self.assertIn(("attack", True, True), self.s.actions)
+
     def test_close_enemy_retreats_and_attacks(self):
         self.s.enemies = [box(0, -100)]
         self.assertGreater(self.s.run()[1], 0)

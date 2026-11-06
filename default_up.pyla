@@ -11,6 +11,15 @@ safe_range, attack_range, super_range = get_brawler_range(brawler)
 hold_attack = must_brawler_hold_attack(brawler, brawlers_info)
 persistent_data.setdefault("time_since_holding_attack", None)
 
+# Player-relative positions cannot be trusted after a long interruption (for
+# example, death or pause). This is not a real map position or death detector.
+previous_tick = persistent_data.get("bb_search_tick", now)
+if now < previous_tick or now - previous_tick > 2.0:
+    persistent_data["bb_search_started"] = now
+    persistent_data["bb_last_enemy_time"] = None
+    persistent_data["bb_last_enemy_vector"] = None
+persistent_data["bb_search_tick"] = now
+
 
 def unit(x, y):
     length = math.hypot(x, y)
@@ -51,8 +60,17 @@ for box in combat_enemies:
         threat_pos = pos
         threat_distance = d
 
-# Keep pressure towards the opponent's presumed end, but do not blindly rush
-# a nearby enemy. Short-range / zero-safe-range brawlers close the distance.
+# Remember only a very recent direction, not an enemy's map position. The
+# camera follows the player; old screen coordinates become unreliable quickly.
+if threat_pos is not None:
+    persistent_data["bb_last_enemy_time"] = now
+    persistent_data["bb_last_enemy_vector"] = unit(threat_pos[0] - player_pos[0], threat_pos[1] - player_pos[1])
+    persistent_data["bb_last_enemy_distance"] = threat_distance
+    persistent_data["bb_search_started"] = None
+elif persistent_data.get("bb_search_started") is None:
+    persistent_data["bb_search_started"] = now
+
+# Keep the existing combat logic unchanged when a real enemy is visible.
 desired_x, desired_y = 0.0, -1.0
 if threat_pos is not None:
     toward_x, toward_y = unit(threat_pos[0] - player_pos[0], threat_pos[1] - player_pos[1])
@@ -73,6 +91,44 @@ if threat_pos is not None:
         persistent_data["bb_strafe_side"] = side
         desired_x = -toward_y * side * 0.7
         desired_y = toward_x * side * 0.7 - 0.45
+elif not enemy_data:
+    # A distant visible teammate behind us is a reason to regroup toward
+    # our presumed side. A teammate is not a ball or goal detector.
+    support_pos = None
+    support_distance = float("inf")
+    for box in teammate_data:
+        pos = get_entity_pos(box)
+        d = distance(player_pos, pos)
+        if pos[1] - player_pos[1] > TILE_SIZE * 1.8 and d > TILE_SIZE * 3.0 and d < support_distance:
+            support_pos, support_distance = pos, d
+    if support_pos is not None:
+        desired_x, desired_y = unit(support_pos[0] - player_pos[0], support_pos[1] - player_pos[1])
+    else:
+        # Briefly investigate the last heading, but do not chase a vanished
+        # close-range threat or keep stale coordinates forever.
+        last_seen = persistent_data.get("bb_last_enemy_time")
+        last_vector = persistent_data.get("bb_last_enemy_vector")
+        recent = (last_seen is not None and last_vector is not None
+                  and 0 <= now - last_seen <= 0.8
+                  and persistent_data.get("bb_last_enemy_distance", 0) > safe_range * 0.9)
+        if recent:
+            desired_x, desired_y = last_vector
+        else:
+            # Timed local search, not knowledge of where enemies or the goal
+            # actually are. Keep long phases to limit rapid direction changes.
+            elapsed = max(0.0, now - persistent_data["bb_search_started"])
+            if elapsed >= 4.0:
+                cycle = elapsed - 4.0
+                phase = cycle % 16.0
+                side = 1 if int(cycle / 16.0) % 2 == 0 else -1
+                if phase < 6.0:
+                    desired_x, desired_y = side * 0.3, 1.0
+                elif phase < 9.0:
+                    desired_x, desired_y = side, -0.15
+                elif phase < 13.0:
+                    desired_x, desired_y = -side * 0.3, -1.0
+                else:
+                    desired_x, desired_y = -side, -0.15
 
 # Stay out of a teammate's immediate space without chasing the team away
 # from the objective. This is local separation, not ball-carrier detection.
